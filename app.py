@@ -1,44 +1,84 @@
 from flask import Flask, request, jsonify
 import face_recognition
+import cv2
+import numpy as np
+import base64
 import os
+from flask_cors import CORS
 
 app = Flask(__name__)
+CORS(app, resources={r"/*": {"origins": "*"}})
 
-# Load known faces
-known_faces = {}  # This should contain names and face encodings
-known_faces_folder = "known_faces"  # Adjust based on your folder structure
+KNOWN_FACES_DIR = "known_faces"
 
-# Load all enrolled faces at startup
-for filename in os.listdir(known_faces_folder):
-    if filename.endswith(".jpg") or filename.endswith(".jpeg") or filename.endswith(".png"):
-        filepath = os.path.join(known_faces_folder, filename)
-        image = face_recognition.load_image_file(filepath)
-        encodings = face_recognition.face_encodings(image)
-        if encodings:
-            name = filename.split(".")[0]
-            known_faces[name] = encodings[0]
+if not os.path.exists(KNOWN_FACES_DIR):
+    os.makedirs(KNOWN_FACES_DIR)
+
+
+@app.route('/enroll', methods=['POST'])
+def enroll():
+    try:
+        data = request.json
+        if 'image' not in data or 'name' not in data:
+            return jsonify({'status': 'error', 'message': 'Missing image or name'}), 400
+
+        # Decode the Base64 image
+        image_data = base64.b64decode(data['image'])
+        nparr = np.frombuffer(image_data, np.uint8)
+        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+        if image is None:
+            return jsonify({'status': 'error', 'message': 'Failed to decode image'}), 400
+
+        # Encode face
+        face_encodings = face_recognition.face_encodings(image)
+        if not face_encodings:
+            return jsonify({'status': 'error', 'message': 'No face detected in the image'}), 400
+
+        # Save encoding to file
+        np.save(os.path.join(KNOWN_FACES_DIR, f"{data['name']}.npy"), face_encodings[0])
+        return jsonify({'status': 'success', 'message': f"Face registered for {data['name']}"}), 200
+
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
 
 @app.route('/verify', methods=['POST'])
-def verify_face():
-    # Ensure an image is provided
-    if 'image' not in request.files:
-        return jsonify({'status': 'error', 'message': 'No image provided'})
+def verify():
+    try:
+        data = request.json
+        if 'image' not in data:
+            return jsonify({'status': 'error', 'message': 'Missing image'}), 400
 
-    file = request.files['image']
-    image = face_recognition.load_image_file(file)
-    face_encodings = face_recognition.face_encodings(image)
+        # Decode the Base64 image
+        image_data = base64.b64decode(data['image'])
+        nparr = np.frombuffer(image_data, np.uint8)
+        image = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-    if not face_encodings:
-        return jsonify({'status': 'error', 'message': 'No face detected'})
+        if image is None:
+            return jsonify({'status': 'error', 'message': 'Failed to decode image'}), 400
 
-    # Match with known faces
-    student_face = face_encodings[0]
-    for name, face_encoding in known_faces.items():
-        matches = face_recognition.compare_faces([face_encoding], student_face)
-        if True in matches:
-            return jsonify({'status': 'success', 'message': f'Face matched for {name}'})
+        face_encodings = face_recognition.face_encodings(image)
+        if not face_encodings:
+            return jsonify({'status': 'error', 'message': 'No face detected in the image'}), 400
 
-    return jsonify({'status': 'error', 'message': 'Face not recognized'})
+        unknown_encoding = face_encodings[0]
+
+        # Compare with known faces
+        for filename in os.listdir(KNOWN_FACES_DIR):
+            if filename.endswith(".npy"):
+                known_encoding = np.load(os.path.join(KNOWN_FACES_DIR, filename))
+                name = os.path.splitext(filename)[0]
+
+                results = face_recognition.compare_faces([known_encoding], unknown_encoding)
+                if results[0]:
+                    return jsonify({'status': 'success', 'message': f"Match found! This is {name}"}), 200
+
+        return jsonify({'status': 'error', 'message': 'No match found'}), 404
+
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(debug=False, port=5000)
